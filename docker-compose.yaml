@@ -22,11 +22,24 @@ services:
         - POSTGRES_USER=${POSTGRES_USER}
         - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
         - POSTGRES_DB=${POSTGRES_DB}
+        command: 
+            - "postgres"
+            - "-c"
+            - "wal_level=logical"
+            - "-c"
+            - "max_replication_slots=4"  # Để dự phòng, có thể set > 1
+            - "-c"
+            - "max_wal_senders=4"
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U finhouse -d finhouse"]
+            interval: 5s
+            timeout: 5s
+            retries: 5
         ports:
         - "5432:5432"
         volumes:
         - postgres_data:/var/lib/postgresql/data 
-        - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+        - ./services/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql
 
     redis:
         <<: *net
@@ -65,7 +78,7 @@ services:
 
     debezium-cdc:
         <<: *net
-        image: quay.io/debezium/connect:2.5
+        build: ./services/debezium/
         container_name: debezium-cdc
         ports:
         - "8083:8083"
@@ -80,23 +93,59 @@ services:
         - kafka
         - postgres_source
 
-    flink:
+    debezium-init:
         <<: *net
-        image: flink:1.17
+        build: ./services/debezium/
+        container_name: debezium-init
+        depends_on:
+            debezium-cdc: 
+                condition: service_started
+        volumes:
+            - ./services/debezium:/debezium
+        # Chuyển dấu > thành | để bảo toàn cấu trúc xuống dòng của shell script
+        command: |
+            sh -c "
+            echo '⏳ Đang chờ Debezium sẵn sàng...';
+            
+            while ! curl -s -f http://debezium-cdc:8083/ > /dev/null; do
+                sleep 5;
+            done;
+            
+            echo '\n';
+            echo '✅ Debezium đã khởi động xong. Chờ thêm 5 giây để ổn định API...';
+            sleep 5;
+            
+            echo '✅ Bắt đầu đăng ký Postgres Source Connector...';
+            curl -i -X POST -H 'Accept:application/json' -H 'Content-Type:application/json' http://debezium-cdc:8083/connectors -d @/debezium/register-postgres.json;
+            
+            echo '\n✅ Bắt đầu đăng ký Redis Sink Connector...';
+            curl -i -X POST -H 'Accept:application/json' -H 'Content-Type:application/json' http://debezium-cdc:8083/connectors -d @/debezium/register-redis.json;
+            "
+
+    flink-jobmanager:
+        <<: *net
+        build: ./services/flink
         container_name: flink-jobmanager
         ports:
-        - "8084:8081"
+            - "8084:8081" # Giao diện Web UI của Flink
         command: jobmanager
         environment:
-        - |
-            FLINK_PROPERTIES=
-            jobmanager.rpc.address: flink
-            rest.address: 0.0.0.0
-            rest.port: 8081
-        - TZ=Asia/Ho_Chi_Minh
-        depends_on:
-        - kafka
+            - |
+              FLINK_PROPERTIES=
+              jobmanager.rpc.address: flink-jobmanager
 
+    flink-taskmanager:
+        <<: *net
+        build: ./services/flink
+        container_name: flink-taskmanager
+        depends_on:
+            - flink-jobmanager
+        command: taskmanager
+        environment:
+            - |
+              FLINK_PROPERTIES=
+              jobmanager.rpc.address: flink-jobmanager
+              taskmanager.numberOfTaskSlots: 2 # Số luồng xử lý song song
     data-generator:
         <<: *net
         build: ./services/data-generator
@@ -105,7 +154,10 @@ services:
             KAFKA_BOOTSTRAP_SERVERS: kafka:9092
             TZ: Asia/Ho_Chi_Minh
         depends_on:
-        - kafka
+            kafka:
+                condition: service_started  # Trạng thái mặc định (chỉ cần khởi động)
+            postgres_source: 
+                condition: service_healthy  # Đợi healthcheck pass
 
     # --- DATA STAKE (MINIO, HIVE, TRINO) ---
     minio:

@@ -1,0 +1,17 @@
+{
+  "name": "finhouse-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "finhouse",
+    "database.password": "finhouse",
+    "database.dbname": "finhouse",
+    "database.server.name": "finhouse",
+    "plugin.name": "pgoutput",
+    "table.include.list": "public.transactions",
+    "slot.name": "debezium_slot",
+    "topic.prefix": "finhouse"
+  }
+}
